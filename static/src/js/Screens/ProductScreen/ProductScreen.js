@@ -20,7 +20,7 @@ odoo.define('pos_product_lot_list.ProductScreen', function(require) {
                 var productLot = [];
                 var location_id = this.env.pos.config.ubicacion_id[0];
                 var lot_list = []
-                var optionsProduct = await this._getAddProductOptions(productSelected);
+                
                 if (productSelected.tracking == "lot"){
                     productLot = await this.rpc({
                         model: 'stock.quant',
