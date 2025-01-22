@@ -8,7 +8,6 @@ odoo.define('pos_product_lot_list.ProductScreen', function(require) {
     var core = require('web.core');
     var _t = core._t;
 
-
     const PosProductLotListProductScreen = ProductScreen =>
         class extends ProductScreen {
             constructor(obj, options) {
