@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <record id="check_stock_pos_config_view_form" model="ir.ui.view">
+            <field name="name">check_stock.pos.config.form.viewt</field>
+            <field name="model">pos.config</field>
+            <field name="inherit_id" ref="point_of_sale.pos_config_view_form"/>
+            <field name="arch" type="xml">
+                <sheet position="inside">
+                    <setting string="Ubicacion a verificar al seleccionar producto"
+                             help="Configura no permitir negativos">
+                        <div class="content-group mt16">
+                            <div class="row mb-3">
+                                <div class="col-lg-4 o_light_label">
+                                    <label for="ubicacion_id"/>
+                                </div>
+                                <div class="col-lg-8">
+                                    <field name="ubicacion_id"/>
+                                </div>
+                            </div>
+                        </div>
+                    </setting>
+                </sheet>
+            </field>
+        </record>
+
+    </data>
+</odoo>
