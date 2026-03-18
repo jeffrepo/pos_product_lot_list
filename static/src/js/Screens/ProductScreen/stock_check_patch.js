@@ -8,7 +8,7 @@ const OriginalAdd = ProductScreen.prototype.addProductToOrder;
 patch(ProductScreen.prototype, {
     async addProductToOrder(product) {
         try {
-            // 1) Intentar obtener un product variant id válido
+            // ------------- Determinar variantId (robusto) -------------
             let variantId = null;
 
             if (product && product.product_variant_ids && product.product_variant_ids.length) {
@@ -36,18 +36,67 @@ patch(ProductScreen.prototype, {
                 }
             }
 
+            // Si no pudimos determinar una variante, dejamos seguir el flujo original
             if (!variantId) {
                 return await OriginalAdd.call(this, product);
             }
 
-            // Obtener location si lo necesitas (lo dejamos por compatibilidad)
+            // Si el producto (template) es COMBO, **no** verificar stock aquí:
+            // dejamos que se abra el configurador; la comprobación la hará el popup.
+            // --- DETECCIÓN ROBUSTA DE TEMPLATE / isCombo ---
+            let tmpl = null;
+            try {
+                // 1) Si product.product_tmpl_id existe y es un objeto (posiblemente ya es el template)
+                if (product && product.product_tmpl_id && typeof product.product_tmpl_id === "object") {
+                    tmpl = product.product_tmpl_id;
+                }
+                // 2) Si es un array tipo [id, name]
+                else if (product && Array.isArray(product.product_tmpl_id)) {
+                    const tid = product.product_tmpl_id[0];
+                    tmpl = this.pos.models["product.template"]?.get(tid);
+                }
+                // 3) Si es un número (id)
+                else if (product && typeof product.product_tmpl_id === "number") {
+                    tmpl = this.pos.models["product.template"]?.get(product.product_tmpl_id);
+                }
+                // 4) Si el product **es** ya un template (no tiene product_tmpl_id pero tiene combo_ids)
+                else if (product && product.combo_ids) {
+                    tmpl = product;
+                }
+                // 5) Fallback: intentar buscar template por el id si product.product_tmpl_id tiene .id (caso raro)
+                else if (product && product.product_tmpl_id && product.product_tmpl_id.id) {
+                    tmpl = this.pos.models["product.template"]?.get(product.product_tmpl_id.id);
+                }
+            } catch (e) {
+                console.warn("Error resolviendo template:", e);
+                tmpl = null;
+            }
+
+            console.log("DEBUG product", product);
+            console.log("DEBUG product.product_tmpl_id", product && product.product_tmpl_id);
+            console.log("DEBUG tmpl resolved", tmpl);
+            
+            // Determinar si es combo: soporte isCombo() (función), isCombo bool, o combo_ids
+            const isCombo =
+                !!tmpl &&
+                (tmpl.isCombo === true ||
+                    (typeof tmpl.isCombo === "function" && tmpl.isCombo()) ||
+                    (Array.isArray(tmpl.combo_ids) && tmpl.combo_ids.length > 0) ||
+                    (tmpl.combo_ids && typeof tmpl.combo_ids === "object" && Object.keys(tmpl.combo_ids).length > 0));
+            
+            if (isCombo) {
+                // es combo -> no comprobamos stock aquí, abrimos configurador
+                return await OriginalAdd.call(this, product);
+            }
+
+            // 2) Obtener location_id desde la configuración del POS (soporte varios nombres)
             const cfg = this.pos.config || {};
             const location_id =
                 (cfg.ubicacion_id && cfg.ubicacion_id[0]) ||
                 (cfg.stock_location_id && cfg.stock_location_id[0]) ||
                 (cfg.stock_location && cfg.stock_location[0]);
 
-            // --- NUEVA LÓGICA: leer qty_available del producto (más fiable) ---
+            // 3) COMPROBACIÓN FIABLE: leer qty_available del producto (variant)
             let totalQty = 0;
             try {
                 const prodInfo = await this.pos.data.searchRead(
@@ -58,24 +107,12 @@ patch(ProductScreen.prototype, {
                 );
                 totalQty = (prodInfo && prodInfo.length) ? Number(prodInfo[0].qty_available || 0) : 0;
             } catch (e) {
-                console.error("Error reading product qty_available:", e);
-                // fallback: intentar leer stock.quant como antes (si realmente quieres mantener el fallback)
-                try {
-                    const domain = location_id
-                        ? [["product_id", "=", variantId], ["location_id", "=", location_id]]
-                        : [["product_id", "=", variantId]];
-                    const quants = await this.pos.data.searchRead("stock.quant", domain, ["quantity"], { limit: 100 });
-                    totalQty = (quants && quants.length)
-                        ? quants.reduce((acc, q) => acc + (Number(q.quantity) || 0), 0)
-                        : 0;
-                } catch (err2) {
-                    console.error("Fallback error reading stock.quant:", err2);
-                    // si todo falla, permitimos flujo original
-                    return await OriginalAdd.call(this, product);
-                }
+                console.error("Error leyendo qty_available:", e);
+                // fallback a permitir (o leer stock.quant si prefieres)
+                return await OriginalAdd.call(this, product);
             }
 
-            // Bloquear si no hay stock
+            // Si no hay stock, bloquear y notificar
             if (totalQty <= 0) {
                 this.notification.add(
                     _t('No hay existencias disponibles para "%s".', product?.name || ""),
