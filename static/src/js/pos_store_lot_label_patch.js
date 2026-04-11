@@ -36,24 +36,41 @@ patch(PosStore.prototype, {
                 { limit: 200 }
             );
 
+            const lotIds = [...new Set(
+                (quants || [])
+                    .map((q) => q.lot_id)
+                    .filter((id) => !!id)
+            )];
+
+            let lotsById = {};
+            if (lotIds.length) {
+                const lots = await this.data.searchRead(
+                    "stock.lot",
+                    [["id", "in", lotIds]],
+                    ["id", "name"]
+                );
+                lotsById = Object.fromEntries((lots || []).map((l) => [l.id, l.name]));
+            }
+
+
             // Mapear a la forma que espera SelectLotPopup / el resto del código.
             // Creamos 'name' con Lote + Cantidad + Caducidad para que el popup lo muestre.
             existingLots = (quants || [])
-                .filter((q) => q.lot_id && Number(q.quantity || 0) > 0) // solo positivos
+                .filter((q) => q.lot_id && Number(q.quantity || 0) > 0)
                 .map((q) => {
-                    const lotId = q.lot_id ? q.lot_id[0] : undefined;
-                    const lotName = q.lot_id ? q.lot_id[1] : "";
+                    const lotId = q.lot_id;
+                    const lotName = lotsById[lotId] || "";
                     const qty = Number(q.quantity || 0);
-                    const removal = q.removal_date ? String(q.removal_date) : "";
-                    const formattedName = `Lote: ${lotName} — Disponible: ${qty}${removal ? " — CAD: " + removal : ""}`;
+                    const removal = q.removal_date || "";
+                    const formattedName = `Lote: ${lotName} - Disponible: ${qty}${removal ? " - CAD: " + removal : ""}`;
+            
                     return {
                         id: lotId,
+                        lot_id: lotId,
                         name: formattedName,
-                        // para compatibilidad con el código original (espera product_qty y name)
                         product_qty: qty,
-                        // también pasamos lot_name y removal_date por si lo necesitas luego
-                        lot_name: lotName,
-                        removal_date: q.removal_date,
+                        quantity: qty,
+                        removal_date: removal,
                     };
                 });
         } catch (ex) {
