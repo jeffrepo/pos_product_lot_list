@@ -1,14 +1,15 @@
-/** pos_product_lot_list/static/src/js/pos_store_lot_label_patch.js */
+/** pos_product_lot_list/static/src/js/pos_store_lot_label_patch.js (corregido) */
 import { patch } from "@web/core/utils/patch";
 import { SelectLotPopup } from "@point_of_sale/app/components/popups/select_lot_popup/select_lot_popup";
 import { makeAwaitable } from "@point_of_sale/app/utils/make_awaitable_dialog";
 import { PosStore } from "@point_of_sale/app/services/pos_store";
 import { _t } from "@web/core/l10n/translation";
+import { AlertDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
 
 function normalizeId(value) {
     if (!value && value !== 0) return undefined;
     if (Array.isArray(value)) return value[0];
-    if (typeof value === "object" && value.id) return value.id;
+    if (typeof value === "object" && value && value.id) return value.id;
     if (typeof value === "number") return value;
     const n = Number(value);
     return Number.isFinite(n) ? n : undefined;
@@ -20,8 +21,7 @@ patch(PosStore.prototype, {
         let canCreateLots = this.pickingType.use_create_lots || !this.pickingType.use_existing_lots;
 
         let existingLots = [];
-        // <-- Declarar usedLotsQty aquí para que esté disponible fuera del try
-        let usedLotsQty = {};
+        let usedLotsQty = {}; // declarado en scope superior para evitar ReferenceError
 
         try {
             // ------------------ RESOLVER LOCATION_ID ROBUSTAMENTE ------------------
@@ -147,7 +147,6 @@ patch(PosStore.prototype, {
             });
 
             // ------------------ RESTAR LOTES USADOS POR ORDENES DRAFT ------------------
-            // Asignamos a la variable ya declarada arriba para que esté disponible fuera del try
             usedLotsQty = this.models["pos.pack.operation.lot"]
                 .filter(
                     (lot) =>
@@ -191,6 +190,10 @@ patch(PosStore.prototype, {
         } catch (ex) {
             console.error("pos_product_lot_list: error leyendo quants agrupados, fallback al backend:", ex);
             try {
+                await this.env.services.dialog.add(AlertDialog, {
+                    title: _t("Error"),
+                    body: _t("No se pudieron recuperar los lotes desde el servidor."),
+                });
                 existingLots = await this.data.call("pos.order.line", "get_existing_lots", [
                     this.company.id,
                     this.config.id,
@@ -198,7 +201,7 @@ patch(PosStore.prototype, {
                 ]);
             } catch (ex2) {
                 console.error("pos_product_lot_list: fallback también falló:", ex2);
-                this.dialog.add({
+                await this.env.services.dialog.add(AlertDialog, {
                     title: _t("Error"),
                     body: _t("No se pudieron recuperar los lotes desde el servidor."),
                 });
@@ -208,7 +211,7 @@ patch(PosStore.prototype, {
 
         // --- Resto del flujo original ---
         if (!canCreateLots && (!existingLots || existingLots.length === 0)) {
-            this.dialog.add({
+            await this.env.services.dialog.add(AlertDialog, {
                 title: _t("No existing serial/lot number"),
                 body: _t(
                     "There is no serial/lot number for the selected product, and their creation is not allowed from the Point of Sale app."
