@@ -5,77 +5,198 @@ import { makeAwaitable } from "@point_of_sale/app/utils/make_awaitable_dialog";
 import { PosStore } from "@point_of_sale/app/services/pos_store";
 import { _t } from "@web/core/l10n/translation";
 
+function normalizeId(value) {
+    if (!value && value !== 0) return undefined;
+    if (Array.isArray(value)) return value[0];
+    if (typeof value === "object" && value.id) return value.id;
+    if (typeof value === "number") return value;
+    // if string numeric
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+}
+
 patch(PosStore.prototype, {
     async editLots(product, packLotLinesToEdit) {
-        // Copia grande del original pero con la parte de existingLots sustituida
         const isAllowOnlyOneLot = product.isAllowOnlyOneLot();
         let canCreateLots = this.pickingType.use_create_lots || !this.pickingType.use_existing_lots;
 
-        // --- NUEVA PARTE: obtenemos lotes desde stock.quant para mostrar qty y removal_date ---
         let existingLots = [];
         try {
-            // obtener location si está en config (soporte varios nombres)
+            // ------------------ RESOLVER LOCATION_ID ROBUSTAMENTE ------------------
             const cfg = this.config || {};
-            const location_id =
-                (cfg.ubicacion_id && cfg.ubicacion_id[0]) ||
-                (cfg.stock_location_id && cfg.stock_location_id[0]) ||
-                (cfg.stock_location && cfg.stock_location[0]);
+            // Lista de candidatos, en orden de preferencia:
+            const candidates = [];
 
-            const domain = location_id
-                ? [
-                      ["product_id", "=", product.id],
-                      ["location_id", "=", location_id],
-                  ]
-                : [["product_id", "=", product.id]];
-
-            // leemos los quants; pedimos lot_id, quantity y removal_date
-            const quants = await this.data.searchRead(
-                "stock.quant",
-                domain,
-                ["lot_id", "quantity", "removal_date"],
-                { limit: 200 }
+            // 1) Campos habituales en cfg
+            candidates.push(
+                cfg.ubicacion_id,
+                cfg.stock_location_id,
+                cfg.stock_location,
+                cfg.location_id,
+                cfg.default_location_src_id,
+                cfg.default_location_dest_id
             );
 
-            const lotIds = [...new Set(
-                (quants || [])
-                    .map((q) => q.lot_id)
-                    .filter((id) => !!id)
-            )];
-
-            let lotsById = {};
-            if (lotIds.length) {
-                const lots = await this.data.searchRead(
-                    "stock.lot",
-                    [["id", "in", lotIds]],
-                    ["id", "name"]
+            // 2) Intentar desde this.pickingType (viene en PosStore y tiene default locations)
+            if (this.pickingType) {
+                candidates.push(
+                    this.pickingType.default_location_src_id,
+                    this.pickingType.default_location_dest_id,
+                    this.pickingType.default_location_id
                 );
-                lotsById = Object.fromEntries((lots || []).map((l) => [l.id, l.name]));
             }
 
+            // 3) Intentar desde la orden seleccionada (a veces la order contiene la ubicación)
+            try {
+                if (this.selectedOrder) {
+                    // SelectedOrder puede ser un modelo OWL o un objeto legacy
+                    const so = this.selectedOrder;
+                    // si tiene método get
+                    if (typeof so.get === "function") {
+                        candidates.push(so.get("location_id"));
+                        candidates.push(so.get("picking_type_id"));
+                    } else {
+                        candidates.push(so.location_id, so.picking_type_id);
+                    }
+                }
+            } catch (e) {
+                console.warn("pos_store_lot_label_patch: error probing selectedOrder for location", e);
+            }
 
-            // Mapear a la forma que espera SelectLotPopup / el resto del código.
-            // Creamos 'name' con Lote + Cantidad + Caducidad para que el popup lo muestre.
-            existingLots = (quants || [])
-                .filter((q) => q.lot_id && Number(q.quantity || 0) > 0)
-                .map((q) => {
-                    const lotId = q.lot_id;
-                    const lotName = lotsById[lotId] || "";
-                    const qty = Number(q.quantity || 0);
-                    const removal = q.removal_date || "";
-                    const formattedName = `Lote: ${lotName} - Disponible: ${qty}${removal ? " - CAD: " + removal : ""}`;
-            
-                    return {
-                        id: lotId,
-                        lot_id: lotId,
-                        name: formattedName,
-                        product_qty: qty,
-                        quantity: qty,
-                        removal_date: removal,
-                    };
-                });
+            // 4) Por si acaso, intentar campos en this (PosStore) directamente
+            candidates.push(
+                this.location_id,
+                this.default_location_id,
+                this.stock_location_id,
+            );
+
+            // Normalizar y tomar el primero válido
+            let location_id;
+            for (const c of candidates) {
+                const id = normalizeId(c);
+                if (id) {
+                    location_id = id;
+                    break;
+                }
+            }
+
+            // Debug: imprimir candidatos y resultado
+            console.log("DEBUG pos_store_lot_label_patch: cfg keys:", Object.keys(cfg || {}));
+            console.log("DEBUG pos_store_lot_label_patch: location candidates sample:", candidates.slice(0, 10));
+            console.log("DEBUG pos_store_lot_label_patch: resolved location_id:", location_id);
+
+            // ------------------ PREPARAR DOMAIN ------------------
+            const domainBase = [
+                ["product_id", "=", product.id],
+                ["quantity", ">", 0],
+                ["lot_id", "!=", false],
+            ];
+            const domain = location_id
+                ? [["product_id", "=", product.id], ["location_id", "=", location_id], ["quantity", ">", 0], ["lot_id", "!=", false]]
+                : domainBase.slice();
+
+            if (this.company && this.company.id) {
+                domain.push(["company_id", "=", this.company.id]);
+            }
+
+            console.log("DEBUG pos_store_lot_label_patch: domain used for stock.quant:", domain);
+
+            // ------------------ LEER QUANTS FILTRADOS Y AGRUPAR EN CLIENTE ------------------
+            let quants = [];
+            try {
+                quants = await this.data.searchRead(
+                    "stock.quant",
+                    domain,
+                    ["lot_id", "quantity", "removal_date"],
+                    { limit: 2000, order: "lot_id" }
+                );
+            } catch (e) {
+                console.warn("pos_store_lot_label_patch: searchRead stock.quant falló:", e);
+                quants = [];
+            }
+
+            console.log("DEBUG pos_store_lot_label_patch: quants length (raw):", quants.length);
+
+            // Agrupar y sumar por lote
+            const lotSums = quants.reduce((acc, q) => {
+                const lotId = normalizeId(q.lot_id);
+                if (!lotId) return acc;
+                const qty = Number(q.quantity || 0);
+                if (qty <= 0) return acc;
+                if (!acc[lotId]) acc[lotId] = { quantity: 0, removal_dates: [] };
+                acc[lotId].quantity += qty;
+                if (q.removal_date) acc[lotId].removal_dates.push(q.removal_date);
+                return acc;
+            }, {});
+
+            const lotIds = Object.keys(lotSums).map(k => Number(k)).filter(Boolean);
+            console.log("DEBUG pos_store_lot_label_patch: lotIds after grouping:", lotIds.length, lotIds.slice(0, 20));
+
+            // ------------------ OBTENER NOMBRES DE LOTES ------------------
+            let lotsById = {};
+            if (lotIds.length) {
+                try {
+                    const lots = await this.data.searchRead("stock.lot", [["id", "in", lotIds]], ["id", "name"], { limit: 2000 });
+                    lotsById = Object.fromEntries((lots || []).map(l => [l.id, l.name]));
+                } catch (e) {
+                    console.warn("pos_store_lot_label_patch: searchRead stock.lot falló:", e);
+                    lotsById = {};
+                }
+            }
+
+            // ------------------ OBTENER REMOVAL_DATE MÍNIMA POR LOTE ------------------
+            const removalsByLot = {};
+            lotIds.forEach(lid => {
+                const arr = (lotSums[lid] && lotSums[lid].removal_dates) || [];
+                if (arr.length) {
+                    arr.sort();
+                    removalsByLot[lid] = arr[0];
+                }
+            });
+
+            // ------------------ RESTAR LOTES USADOS POR ORDENES DRAFT ------------------
+            const usedLotsQty = this.models["pos.pack.operation.lot"]
+                .filter(
+                    (lot) =>
+                        lot.pos_order_line_id?.product_id?.id === product.id &&
+                        lot.pos_order_line_id?.order_id?.state === "draft"
+                )
+                .reduce((acc, lot) => {
+                    const lotName = lot.lot_name;
+                    if (!acc[lotName]) acc[lotName] = { total: 0, currentOrderCount: 0 };
+                    acc[lotName].total += lot.pos_order_line_id?.qty || 0;
+                    if (lot.pos_order_line_id?.order_id?.id === this.selectedOrder.id) {
+                        acc[lotName].currentOrderCount += lot.pos_order_line_id?.qty || 0;
+                    }
+                    return acc;
+                }, {});
+
+            // ------------------ CONSTRUIR existingLots ------------------
+            existingLots = lotIds.map(lid => {
+                const info = lotSums[lid] || { quantity: 0 };
+                const lotName = lotsById[lid] || String(lid);
+                const usedEntry = usedLotsQty[lotName];
+                const usedTotal = usedEntry ? usedEntry.total : 0;
+                const currentOrderCount = usedEntry ? usedEntry.currentOrderCount : 0;
+                const available = Number(info.quantity || 0) - (usedTotal - currentOrderCount || 0);
+                return {
+                    id: lid,
+                    lot_id: lid,
+                    lot_name: lotName,
+                    name: `Lote: ${lotName} - Disponible: ${available}${removalsByLot[lid] ? " - CAD: " + removalsByLot[lid] : ""}`,
+                    product_qty: available,
+                    quantity: available,
+                    removal_date: removalsByLot[lid] || "",
+                    _raw_total: Number(info.quantity || 0),
+                    _used_total: usedTotal,
+                    _used_current_order: currentOrderCount,
+                };
+            }).filter(l => l.product_qty > 0);
+
+            console.log("DEBUG pos_store_lot_label_patch: final existingLots length:", existingLots.length);
+
         } catch (ex) {
-            // Si falla la consulta directa, intentamos el camino original (backend)
-            console.error("pos_product_lot_list: error leyendo stock.quant, fallback al backend:", ex);
+            console.error("pos_product_lot_list: error leyendo quants agrupados, fallback al backend:", ex);
             try {
                 existingLots = await this.data.call("pos.order.line", "get_existing_lots", [
                     this.company.id,
@@ -92,7 +213,7 @@ patch(PosStore.prototype, {
             }
         }
 
-        // --- Resto del código original (adaptado) ---
+        // --- Resto del flujo original ---
         if (!canCreateLots && (!existingLots || existingLots.length === 0)) {
             this.dialog.add({
                 title: _t("No existing serial/lot number"),
@@ -103,46 +224,17 @@ patch(PosStore.prototype, {
             return null;
         }
 
-        // Calcular lotes ya usados en órdenes en borrador
-        const usedLotsQty = this.models["pos.pack.operation.lot"]
-            .filter(
-                (lot) =>
-                    lot.pos_order_line_id?.product_id?.id === product.id &&
-                    lot.pos_order_line_id?.order_id?.state === "draft"
-            )
-            .reduce((acc, lot) => {
-                if (!acc[lot.lot_name]) {
-                    acc[lot.lot_name] = { total: 0, currentOrderCount: 0 };
-                }
-                acc[lot.lot_name].total += lot.pos_order_line_id?.qty || 0;
-
-                if (lot.pos_order_line_id?.order_id?.id === this.selectedOrder.id) {
-                    acc[lot.lot_name].currentOrderCount += lot.pos_order_line_id?.qty || 0;
-                }
-                return acc;
-            }, {});
-
-        // Remove lot/serial names that are already used in draft orders
-        existingLots = existingLots.filter(
-            (lot) => lot.product_qty > (usedLotsQty[lot.name]?.total || 0)
-        );
-
-        // Check if the input lot/serial name is already used in another order
-        const isLotNameUsed = (itemValue) => {
-            const totalQty = existingLots.find((lt) => lt.name == itemValue)?.product_qty || 0;
-            const usedQty = usedLotsQty[itemValue]
-                ? usedLotsQty[itemValue].total - usedLotsQty[itemValue].currentOrderCount
-                : 0;
-            return usedQty ? usedQty >= totalQty : false;
-        };
-
-        const existingLotsName = existingLots.map((l) => l.name);
+        const existingLotsName = (existingLots || []).map((l) => l.name || l.lot_name || String(l.id));
         if (!packLotLinesToEdit.length && existingLotsName.length === 1) {
-            // If there's only one existing lot/serial number, automatically assign it to the order line
             return { newPackLotLines: [{ lot_name: existingLotsName[0] }] };
         }
 
-        // Llamamos al popup con las opciones preparadas — el name ya contiene la fecha y la cantidad
+        const isLotNameUsed = (itemValue) => {
+            const totalQty = (existingLots.find((lt) => lt.name == itemValue) || {}).product_qty || 0;
+            const used = usedLotsQty[itemValue] ? usedLotsQty[itemValue].total - usedLotsQty[itemValue].currentOrderCount : 0;
+            return used ? used >= totalQty : false;
+        };
+
         const payload = await makeAwaitable(this.dialog, SelectLotPopup, {
             title: _t("Lot/Serial number(s) required for"),
             name: product.display_name,
@@ -155,7 +247,6 @@ patch(PosStore.prototype, {
         });
 
         if (payload) {
-            // Segregate the old and new packlot lines (idéntico a original)
             const modifiedPackLotLines = Object.fromEntries(
                 payload.filter((item) => item.id).map((item) => [item.id, item.text])
             );
