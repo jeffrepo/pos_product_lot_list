@@ -10,7 +10,6 @@ function normalizeId(value) {
     if (Array.isArray(value)) return value[0];
     if (typeof value === "object" && value.id) return value.id;
     if (typeof value === "number") return value;
-    // if string numeric
     const n = Number(value);
     return Number.isFinite(n) ? n : undefined;
 }
@@ -21,13 +20,14 @@ patch(PosStore.prototype, {
         let canCreateLots = this.pickingType.use_create_lots || !this.pickingType.use_existing_lots;
 
         let existingLots = [];
+        // <-- Declarar usedLotsQty aquí para que esté disponible fuera del try
+        let usedLotsQty = {};
+
         try {
             // ------------------ RESOLVER LOCATION_ID ROBUSTAMENTE ------------------
             const cfg = this.config || {};
-            // Lista de candidatos, en orden de preferencia:
             const candidates = [];
 
-            // 1) Campos habituales en cfg
             candidates.push(
                 cfg.ubicacion_id,
                 cfg.stock_location_id,
@@ -37,7 +37,6 @@ patch(PosStore.prototype, {
                 cfg.default_location_dest_id
             );
 
-            // 2) Intentar desde this.pickingType (viene en PosStore y tiene default locations)
             if (this.pickingType) {
                 candidates.push(
                     this.pickingType.default_location_src_id,
@@ -46,12 +45,9 @@ patch(PosStore.prototype, {
                 );
             }
 
-            // 3) Intentar desde la orden seleccionada (a veces la order contiene la ubicación)
             try {
                 if (this.selectedOrder) {
-                    // SelectedOrder puede ser un modelo OWL o un objeto legacy
                     const so = this.selectedOrder;
-                    // si tiene método get
                     if (typeof so.get === "function") {
                         candidates.push(so.get("location_id"));
                         candidates.push(so.get("picking_type_id"));
@@ -63,14 +59,12 @@ patch(PosStore.prototype, {
                 console.warn("pos_store_lot_label_patch: error probing selectedOrder for location", e);
             }
 
-            // 4) Por si acaso, intentar campos en this (PosStore) directamente
             candidates.push(
                 this.location_id,
                 this.default_location_id,
                 this.stock_location_id,
             );
 
-            // Normalizar y tomar el primero válido
             let location_id;
             for (const c of candidates) {
                 const id = normalizeId(c);
@@ -80,7 +74,6 @@ patch(PosStore.prototype, {
                 }
             }
 
-            // Debug: imprimir candidatos y resultado
             console.log("DEBUG pos_store_lot_label_patch: cfg keys:", Object.keys(cfg || {}));
             console.log("DEBUG pos_store_lot_label_patch: location candidates sample:", candidates.slice(0, 10));
             console.log("DEBUG pos_store_lot_label_patch: resolved location_id:", location_id);
@@ -117,7 +110,6 @@ patch(PosStore.prototype, {
 
             console.log("DEBUG pos_store_lot_label_patch: quants length (raw):", quants.length);
 
-            // Agrupar y sumar por lote
             const lotSums = quants.reduce((acc, q) => {
                 const lotId = normalizeId(q.lot_id);
                 if (!lotId) return acc;
@@ -155,7 +147,8 @@ patch(PosStore.prototype, {
             });
 
             // ------------------ RESTAR LOTES USADOS POR ORDENES DRAFT ------------------
-            const usedLotsQty = this.models["pos.pack.operation.lot"]
+            // Asignamos a la variable ya declarada arriba para que esté disponible fuera del try
+            usedLotsQty = this.models["pos.pack.operation.lot"]
                 .filter(
                     (lot) =>
                         lot.pos_order_line_id?.product_id?.id === product.id &&
