@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 
 import re
-from odoo import models
+from odoo import api, fields, models, _
+import logging
+from odoo.exceptions import UserError, ValidationError
+
+_logger = logging.getLogger(__name__)
 
 
 class StockMove(models.Model):
@@ -29,3 +33,19 @@ class StockMove(models.Model):
                 pack_lot.lot_name = self._clean_pos_lot_name(pack_lot.lot_name)
 
         return super()._create_production_lots_for_pos_order(lines)
+
+
+
+class StockPicking(models.Model):
+    _inherit = "stock.picking"
+
+
+    def _create_move_from_pos_order_lines(self, lines):
+        res = super()._create_move_from_pos_order_lines(lines)
+
+        for picking in self:
+            picking.move_line_ids.filtered(
+                lambda ml: ml.product_id.tracking != "none" and ml.quantity > 0
+            ).picked = True
+
+        return res
