@@ -40,12 +40,14 @@ class StockPicking(models.Model):
     _inherit = "stock.picking"
 
 
+class StockPicking(models.Model):
+    _inherit = "stock.picking"
+
+
     def _create_move_from_pos_order_lines(self, lines):
         res = super()._create_move_from_pos_order_lines(lines)
 
-        for picking in self:
-            picking.move_line_ids.filtered(
-                lambda ml: ml.product_id.tracking != "none" and ml.quantity > 0
-            ).picked = True
+        self.move_ids.picked = True
+        self.move_line_ids.picked = True
 
         return res
