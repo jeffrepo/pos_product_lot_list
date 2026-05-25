@@ -15,6 +15,20 @@ function normalizeId(value) {
     return Number.isFinite(n) ? n : undefined;
 }
 
+function isValidRemovalDate(dateValue) {
+    if (!dateValue) {
+        return true; // si no tiene fecha, lo dejamos mostrar
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const removalDate = new Date(dateValue);
+    removalDate.setHours(0, 0, 0, 0);
+
+    return removalDate > today;
+}
+
 patch(PosStore.prototype, {
     async editLots(product, packLotLinesToEdit) {
         const isAllowOnlyOneLot = product.isAllowOnlyOneLot();
@@ -164,7 +178,9 @@ patch(PosStore.prototype, {
                 }, {});
 
             // ------------------ CONSTRUIR existingLots ------------------
-            existingLots = lotIds.map(lid => {
+            existingLots = lotIds
+                .filter((lid) => isValidRemovalDate(removalsByLot[lid]))
+                .map(lid => {
                 const info = lotSums[lid] || { quantity: 0 };
                 const lotName = lotsById[lid] || String(lid);
                 const usedEntry = usedLotsQty[lotName];
